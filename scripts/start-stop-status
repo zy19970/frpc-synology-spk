@@ -1,0 +1,79 @@
+#!/bin/sh
+set -u
+
+PKGNAME="frpc"
+PKGROOT="${FRPC_PKGROOT:-/var/packages/${PKGNAME}}"
+TARGET="${SYNOPKG_PKGDEST:-$PKGROOT/target}"
+MANAGER="$TARGET/bin/frpc-manager"
+VAR_DIR="$PKGROOT/var"
+MANAGER_PIDFILE="$VAR_DIR/manager.pid"
+LOGFILE="$VAR_DIR/frpc.log"
+TEMP_LOG="${SYNOPKG_TEMP_LOGFILE:-/tmp/${PKGNAME}-service.log}"
+
+message() { printf '%s\n' "$*" > "$TEMP_LOG"; }
+
+read_manager_pid() {
+    [ -s "$MANAGER_PIDFILE" ] || return 1
+    PID="$(cat "$MANAGER_PIDFILE" 2>/dev/null || true)"
+    case "$PID" in ''|*[!0-9]*) return 1 ;; esac
+    return 0
+}
+
+manager_running() {
+    read_manager_pid || return 1
+    [ -d "/proc/$PID" ] || return 1
+    if [ -r "/proc/$PID/cmdline" ]; then
+        tr '\000' ' ' < "/proc/$PID/cmdline" 2>/dev/null | grep -F "frpc-manager" >/dev/null 2>&1 || return 1
+    fi
+    return 0
+}
+
+start_service() {
+    mkdir -p "$VAR_DIR" || { message "Cannot create $VAR_DIR"; return 1; }
+    if manager_running; then return 0; fi
+    rm -f "$MANAGER_PIDFILE"
+    [ -x "$MANAGER" ] || { message "Manager is missing: $MANAGER"; return 1; }
+    nohup "$MANAGER" >> "$VAR_DIR/manager.log" 2>&1 </dev/null &
+    PID=$!
+    echo "$PID" > "$MANAGER_PIDFILE"
+    sleep 2
+    if ! manager_running; then
+        rm -f "$MANAGER_PIDFILE"
+        message "FRP manager exited during startup. Check $VAR_DIR/manager.log"
+        return 1
+    fi
+    return 0
+}
+
+stop_service() {
+    if ! manager_running; then
+        rm -f "$MANAGER_PIDFILE"
+        return 0
+    fi
+    kill "$PID" 2>/dev/null || true
+    count=0
+    while [ -d "/proc/$PID" ] && [ "$count" -lt 15 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    [ -d "/proc/$PID" ] && kill -9 "$PID" 2>/dev/null || true
+    rm -f "$MANAGER_PIDFILE"
+    return 0
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    status)
+        if manager_running; then exit 0; elif [ -e "$MANAGER_PIDFILE" ]; then exit 1; else exit 3; fi
+        ;;
+    log) echo "$LOGFILE"; exit 0 ;;
+    prestart)
+        [ -x "$MANAGER" ] || { message "Manager is missing: $MANAGER"; exit 1; }
+        [ -f "$TARGET/ui/index.html" ] || { message "DSM UI is missing: $TARGET/ui/index.html"; exit 1; }
+        [ -x "$TARGET/ui/api.cgi" ] || { message "DSM API CGI is missing: $TARGET/ui/api.cgi"; exit 1; }
+        exit 0
+        ;;
+    prestop) exit 0 ;;
+    *) echo "Usage: $0 {start|stop|status|log|prestart|prestop}" >&2; exit 1 ;;
+esac

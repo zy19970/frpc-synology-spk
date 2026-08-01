@@ -1,0 +1,73 @@
+#!/bin/sh
+set -u
+
+PKGNAME="frpc"
+EXPECTED_VERSION="0.70.1"
+PKGROOT="${FRPC_PKGROOT:-/var/packages/${PKGNAME}}"
+TARGET="${SYNOPKG_PKGDEST:-$PKGROOT/target}"
+ETC_DIR="$PKGROOT/etc"
+VAR_DIR="$PKGROOT/var"
+CONTROL_DIR="$VAR_DIR/control"
+RESPONSE_DIR="$VAR_DIR/responses"
+FRPC_BIN="$TARGET/bin/frpc"
+MANAGER_BIN="$TARGET/bin/frpc-manager"
+INDEX_CGI="$TARGET/ui/index.cgi"
+API_CGI="$TARGET/ui/api.cgi"
+EXAMPLE="$TARGET/share/frpc.toml.example"
+CONFIG="$ETC_DIR/frpc.toml"
+LOGFILE="${SYNOPKG_TEMP_LOGFILE:-/tmp/${PKGNAME}-postinst.log}"
+LEGACY_ROOT="$(dirname "$TARGET")"
+LEGACY_CONFIG="$LEGACY_ROOT/etc/frpc.toml"
+
+WEB_USER="http"
+if ! id "$WEB_USER" >/dev/null 2>&1; then
+    WEB_USER="nobody"
+fi
+WEB_GROUP="$(id -gn "$WEB_USER" 2>/dev/null || echo users)"
+
+log() { printf '%s\n' "$*" >> "$LOGFILE"; }
+fail() { log "ERROR: $*"; exit 1; }
+
+is_elf() {
+    [ -f "$1" ] || return 1
+    magic="$(dd if="$1" bs=1 count=4 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
+    [ "$magic" = "7f454c46" ]
+}
+
+mkdir -p "$ETC_DIR" "$VAR_DIR" "$CONTROL_DIR" "$RESPONSE_DIR" || fail "Cannot create package directories."
+chown root:root "$ETC_DIR" 2>/dev/null || true
+chmod 700 "$ETC_DIR" || fail "Cannot secure configuration directory."
+
+chown root:"$WEB_GROUP" "$CONTROL_DIR" "$RESPONSE_DIR" 2>/dev/null || true
+chmod 730 "$CONTROL_DIR" || fail "Cannot set control directory permissions."
+chmod 770 "$RESPONSE_DIR" || fail "Cannot set response directory permissions."
+chmod 755 "$VAR_DIR" 2>/dev/null || true
+
+if [ ! -f "$CONFIG" ]; then
+    if [ "$LEGACY_CONFIG" != "$CONFIG" ] && [ -s "$LEGACY_CONFIG" ]; then
+        cp "$LEGACY_CONFIG" "$CONFIG" || fail "Cannot migrate the previous frpc.toml."
+        log "Migrated configuration from legacy path: $LEGACY_CONFIG"
+    else
+        [ -f "$EXAMPLE" ] || fail "Configuration template is missing."
+        cp "$EXAMPLE" "$CONFIG" || fail "Cannot create frpc.toml."
+    fi
+fi
+chown root:root "$CONFIG" 2>/dev/null || true
+chmod 600 "$CONFIG" || fail "Cannot set frpc.toml permission to 600."
+
+for file in frpc.log manager.log; do
+    if [ ! -f "$VAR_DIR/$file" ]; then
+        : > "$VAR_DIR/$file" || fail "Cannot create $file."
+    fi
+    chown root:"$WEB_GROUP" "$VAR_DIR/$file" 2>/dev/null || true
+    chmod 640 "$VAR_DIR/$file" 2>/dev/null || true
+done
+
+is_elf "$FRPC_BIN" || fail "The offline package does not contain a valid frpc ELF binary."
+chmod 755 "$FRPC_BIN" "$MANAGER_BIN" "$INDEX_CGI" "$API_CGI" || fail "Cannot set executable permissions."
+
+ACTUAL_VERSION="$($FRPC_BIN --version 2>/dev/null | head -n 1 || true)"
+[ "$ACTUAL_VERSION" = "$EXPECTED_VERSION" ] || fail "Unexpected frpc version: ${ACTUAL_VERSION:-unknown}."
+
+log "Installed official frpc ${ACTUAL_VERSION} from the offline SPK. No network download was performed."
+exit 0

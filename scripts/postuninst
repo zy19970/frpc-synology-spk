@@ -1,0 +1,16 @@
+#!/bin/sh
+PKGNAME="frpc"
+PKGROOT="/var/packages/$PKGNAME"
+WEBMAN_ROOT="/usr/syno/synoman/webman/3rdparty"
+UI_LINK="$WEBMAN_ROOT/$PKGNAME"
+UI_SOURCE="$PKGROOT/target/ui"
+
+if [ "${SYNOPKG_PKG_STATUS:-}" = "UPGRADE" ]; then
+    exit 0
+fi
+if [ -L "$UI_LINK" ]; then
+    actual="$(readlink "$UI_LINK" 2>/dev/null || true)"
+    [ "$actual" = "$UI_SOURCE" ] && rm -f "$UI_LINK" 2>/dev/null || true
+fi
+rm -rf "$PKGROOT/etc" "$PKGROOT/var" 2>/dev/null || true
+exit 0

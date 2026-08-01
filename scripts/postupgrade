@@ -1,0 +1,16 @@
+#!/bin/sh
+set -u
+PKGNAME="frpc"
+PKGROOT="/var/packages/$PKGNAME"
+BACKUP_DIR="${SYNOPKG_TEMP_UPGRADE_FOLDER:-/tmp/frpc-upgrade}"
+mkdir -p "$PKGROOT/etc" "$PKGROOT/var" 2>/dev/null || exit 0
+if [ -s "$BACKUP_DIR/frpc.toml" ]; then
+    cp "$BACKUP_DIR/frpc.toml" "$PKGROOT/etc/frpc.toml" 2>/dev/null || true
+    chown root:root "$PKGROOT/etc/frpc.toml" 2>/dev/null || true
+    chmod 600 "$PKGROOT/etc/frpc.toml" 2>/dev/null || true
+fi
+if [ -f "$BACKUP_DIR/disabled" ]; then
+    : > "$PKGROOT/var/disabled"
+    chmod 600 "$PKGROOT/var/disabled" 2>/dev/null || true
+fi
+exit 0

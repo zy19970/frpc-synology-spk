@@ -1,0 +1,16 @@
+#!/bin/sh
+set -u
+PKGNAME="frpc"
+PKGROOT="/var/packages/$PKGNAME"
+BACKUP_DIR="${SYNOPKG_TEMP_UPGRADE_FOLDER:-/tmp/frpc-upgrade}"
+mkdir -p "$BACKUP_DIR" 2>/dev/null || exit 0
+
+if [ -s "$PKGROOT/etc/frpc.toml" ]; then
+    cp "$PKGROOT/etc/frpc.toml" "$BACKUP_DIR/frpc.toml" 2>/dev/null || true
+else
+    TARGET="${SYNOPKG_PKGDEST:-$PKGROOT/target}"
+    LEGACY_CONFIG="$(dirname "$TARGET")/etc/frpc.toml"
+    [ -s "$LEGACY_CONFIG" ] && cp "$LEGACY_CONFIG" "$BACKUP_DIR/frpc.toml" 2>/dev/null || true
+fi
+[ -f "$PKGROOT/var/disabled" ] && cp "$PKGROOT/var/disabled" "$BACKUP_DIR/disabled" 2>/dev/null || true
+exit 0
