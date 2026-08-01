@@ -1,0 +1,24 @@
+# FRP client configuration for Synology DSM
+# Edit the installed file at:
+#   /var/packages/frpc/etc/frpc.toml
+# Then start the package from Package Center.
+
+serverAddr = "REPLACE_ME_FRPS_HOST"
+serverPort = 7000
+
+# Token authentication. Keep this file permission at 600.
+auth.method = "token"
+auth.token = "REPLACE_ME_TOKEN"
+
+# Exit after an authentication/connect failure instead of leaving a stale service.
+loginFailExit = true
+
+# FRP uses TLS for the control connection by default in current releases.
+# Keep the default unless your frps configuration requires otherwise.
+
+[[proxies]]
+name = "synology-tcp-example"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 5000
+remotePort = 15000

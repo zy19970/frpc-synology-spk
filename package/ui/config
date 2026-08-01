@@ -1,0 +1,16 @@
+{
+  ".url": {
+    "SYNO.SDS.FRPCClient": {
+      "type": "legacy",
+      "title": "FRP Client",
+      "desc": "编辑 frpc.toml 并管理 FRP 客户端",
+      "icon": "images/frpc_{0}.png",
+      "appWindow": "SYNO.SDS.FRPCClient",
+      "allowMultiInstance": false,
+      "width": 1040,
+      "height": 760,
+      "url": "/webman/3rdparty/frpc/index.html",
+      "allUsers": false
+    }
+  }
+}

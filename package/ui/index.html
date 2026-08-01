@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FRP Client 管理</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:#1f2937;background:#f3f6f9}
+*{box-sizing:border-box}body{margin:0;padding:20px}.wrap{max-width:1100px;margin:0 auto}.head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.head h1{font-size:22px;margin:0}.head p{margin:5px 0 0;color:#64748b;font-size:13px}.card{background:#fff;border:1px solid #dbe3ea;border-radius:10px;box-shadow:0 1px 3px rgba(15,23,42,.06);padding:16px;margin-bottom:14px}.status-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:600;background:#e2e8f0;color:#475569}.badge.running{background:#dcfce7;color:#166534}.badge.invalid,.badge.crashed{background:#fee2e2;color:#991b1b}.badge.disabled,.badge.stopped{background:#f1f5f9;color:#475569}.badge.starting,.badge.stopping{background:#fef3c7;color:#92400e}.message{font-size:13px;color:#475569;flex:1;min-width:260px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}button{border:1px solid #cbd5e1;background:#fff;color:#1e293b;border-radius:6px;padding:8px 13px;font-size:13px;cursor:pointer}button:hover{background:#f8fafc}button.primary{background:#2563eb;border-color:#2563eb;color:#fff}button.danger{background:#fff1f2;border-color:#fecdd3;color:#be123c}button:disabled{opacity:.5;cursor:not-allowed}.editor-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.editor-head h2,.log-head h2{font-size:16px;margin:0}.hint{font-size:12px;color:#64748b}.editor{width:100%;min-height:430px;resize:vertical;border:1px solid #cbd5e1;border-radius:7px;padding:12px;font:13px/1.55 Consolas,"SFMono-Regular",monospace;color:#0f172a;background:#fbfdff;tab-size:2;outline:none}.editor:focus{border-color:#60a5fa;box-shadow:0 0 0 3px rgba(59,130,246,.12)}.result{display:none;margin-top:10px;border-radius:6px;padding:9px 11px;font-size:13px;white-space:pre-wrap}.result.ok{display:block;background:#ecfdf5;color:#166534;border:1px solid #bbf7d0}.result.error{display:block;background:#fff1f2;color:#9f1239;border:1px solid #fecdd3}.log{height:220px;overflow:auto;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:7px;padding:12px;font:12px/1.5 Consolas,monospace}.footer{font-size:12px;color:#64748b;text-align:right}.loading{opacity:.65;pointer-events:none}
+</style>
+<script src="/webman/dsmtoken.cgi"></script>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="head">
+    <div><h1>FRP Client 管理</h1><p>在 DSM 中直接编辑、校验并保存 frpc.toml。</p></div>
+    <button onclick="refreshAll()">刷新全部</button>
+  </div>
+
+  <section class="card">
+    <div class="status-row">
+      <span id="state" class="badge">读取中</span>
+      <span id="statusMessage" class="message">正在获取运行状态……</span>
+      <span id="version" class="hint"></span>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="control('start')">启动隧道</button>
+      <button onclick="control('restart')">重启隧道</button>
+      <button class="danger" onclick="control('stop')">停止隧道</button>
+      <button onclick="refreshStatus()">刷新状态</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="editor-head">
+      <div><h2>frpc.toml</h2><div class="hint">保存前会调用官方 frpc 校验；旧配置自动备份为 frpc.toml.bak。</div></div>
+    </div>
+    <textarea id="editor" class="editor" spellcheck="false" autocomplete="off"></textarea>
+    <div class="actions">
+      <button onclick="loadConfig()">重新加载</button>
+      <button onclick="verifyConfig()">仅校验</button>
+      <button class="primary" onclick="saveConfig(false)">保存</button>
+      <button class="primary" onclick="saveConfig(true)">保存并重启</button>
+    </div>
+    <div id="result" class="result"></div>
+  </section>
+
+  <section class="card">
+    <div class="editor-head log-head"><h2>最近日志</h2><button onclick="loadLog()">刷新日志</button></div>
+    <div id="log" class="log">正在读取日志……</div>
+  </section>
+  <div class="footer">配置文件权限保持为 600；仅 DSM 管理员可访问此页面。</div>
+</div>
+<script>
+let token='';
+async function getToken(){
+  try{
+    const r=await fetch('/webman/login.cgi',{credentials:'same-origin',cache:'no-store'});
+    const j=await r.json(); token=j.SynoToken||'';
+  }catch(e){token='';}
+}
+async function callApi(action,body){
+  if(!token) await getToken();
+  const u='/webman/3rdparty/frpc/api.cgi?action='+encodeURIComponent(action)+'&SynoToken='+encodeURIComponent(token);
+  const opt={method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'X-SYNO-TOKEN':token}};
+  if(body!==undefined){opt.body=body;opt.headers['Content-Type']='text/plain; charset=UTF-8';}
+  const r=await fetch(u,opt); const text=await r.text();
+  if(!r.ok) throw new Error(text.trim()||('HTTP '+r.status));
+  return text;
+}
+function busy(on){document.getElementById('app').classList.toggle('loading',on);}
+function showResult(ok,text){const el=document.getElementById('result');el.className='result '+(ok?'ok':'error');el.textContent=text;}
+function parseResponse(text){const p=text.indexOf('\n');return {ok:(p<0?text:text.slice(0,p)).trim()==='OK',message:(p<0?'':text.slice(p+1)).trim()};}
+async function loadConfig(){
+  busy(true);try{const r=parseResponse(await callApi('load'));if(!r.ok)throw new Error(r.message);document.getElementById('editor').value=r.message;showResult(true,'配置已从 NAS 重新加载。');}catch(e){showResult(false,e.message);}finally{busy(false);}
+}
+async function verifyConfig(){
+  busy(true);try{const r=parseResponse(await callApi('verify',document.getElementById('editor').value));showResult(r.ok,r.message||'校验完成。');}catch(e){showResult(false,e.message);}finally{busy(false);}
+}
+async function saveConfig(restart){
+  busy(true);try{const r=parseResponse(await callApi(restart?'save_restart':'save',document.getElementById('editor').value));showResult(r.ok,r.message||'操作完成。');await refreshStatus();await loadLog();}catch(e){showResult(false,e.message);}finally{busy(false);}
+}
+async function control(action){
+  busy(true);try{const r=parseResponse(await callApi(action));showResult(r.ok,r.message||'操作完成。');await refreshStatus();await loadLog();}catch(e){showResult(false,e.message);}finally{busy(false);}
+}
+async function refreshStatus(){
+  try{const text=await callApi('status');const data={};text.split(/\r?\n/).forEach(line=>{const i=line.indexOf('=');if(i>0)data[line.slice(0,i)]=line.slice(i+1);});const state=data.state||'unknown';const badge=document.getElementById('state');badge.textContent=({running:'运行中',invalid:'配置无效',disabled:'已停用',crashed:'异常退出',starting:'启动中',stopping:'停止中',stopped:'已停止'})[state]||'未知';badge.className='badge '+state;document.getElementById('statusMessage').textContent=data.message||'';document.getElementById('version').textContent='frpc '+(data.version||'unknown');}catch(e){document.getElementById('statusMessage').textContent=e.message;}
+}
+async function loadLog(){try{document.getElementById('log').textContent=await callApi('log')||'暂无日志。';}catch(e){document.getElementById('log').textContent=e.message;}}
+async function refreshAll(){await getToken();await Promise.all([refreshStatus(),loadLog()]);await loadConfig();}
+refreshAll();
+setInterval(refreshStatus,5000);
+</script>
+</body>
+</html>

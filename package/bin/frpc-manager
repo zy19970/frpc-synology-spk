@@ -1,0 +1,318 @@
+#!/bin/sh
+set -u
+
+PKGNAME="frpc"
+PKGROOT="${FRPC_PKGROOT:-/var/packages/${PKGNAME}}"
+TARGET="${SYNOPKG_PKGDEST:-$PKGROOT/target}"
+FRPC_BIN="$TARGET/bin/frpc"
+CONFIG="$PKGROOT/etc/frpc.toml"
+VAR_DIR="$PKGROOT/var"
+CONTROL_DIR="$VAR_DIR/control"
+RESPONSE_DIR="$VAR_DIR/responses"
+FRPC_PIDFILE="$VAR_DIR/frpc.pid"
+MANAGER_PIDFILE="$VAR_DIR/manager.pid"
+LOGFILE="$VAR_DIR/frpc.log"
+STATE_FILE="$VAR_DIR/state"
+MESSAGE_FILE="$VAR_DIR/state.message"
+DISABLED_FILE="$VAR_DIR/disabled"
+
+WEB_USER="http"
+if ! id "$WEB_USER" >/dev/null 2>&1; then
+    WEB_USER="nobody"
+fi
+WEB_GROUP="$(id -gn "$WEB_USER" 2>/dev/null || echo users)"
+
+FRPC_PID=""
+SHUTTING_DOWN=0
+RESTART_AT=0
+
+secure_readable_file() {
+    file="$1"
+    mode="${2:-640}"
+    chown root:"$WEB_GROUP" "$file" 2>/dev/null || true
+    chmod "$mode" "$file" 2>/dev/null || true
+}
+
+write_state() {
+    state="$1"
+    shift
+    message="$*"
+    printf '%s\n' "$state" > "$STATE_FILE.tmp"
+    printf '%s\n' "$message" > "$MESSAGE_FILE.tmp"
+    mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+    mv -f "$MESSAGE_FILE.tmp" "$MESSAGE_FILE"
+    secure_readable_file "$STATE_FILE"
+    secure_readable_file "$MESSAGE_FILE"
+}
+
+read_child_pid() {
+    [ -s "$FRPC_PIDFILE" ] || return 1
+    FRPC_PID="$(cat "$FRPC_PIDFILE" 2>/dev/null || true)"
+    case "$FRPC_PID" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+child_running() {
+    read_child_pid || return 1
+    [ -d "/proc/$FRPC_PID" ] || return 1
+    if [ -r "/proc/$FRPC_PID/cmdline" ]; then
+        tr '\000' ' ' < "/proc/$FRPC_PID/cmdline" 2>/dev/null | grep -F "$FRPC_BIN" >/dev/null 2>&1 || return 1
+    fi
+    return 0
+}
+
+config_ready() {
+    [ -s "$CONFIG" ] || return 1
+    grep -q 'REPLACE_ME_' "$CONFIG" 2>/dev/null && return 1
+    tmp="/tmp/frpc-manager-verify.$$"
+    if "$FRPC_BIN" verify -c "$CONFIG" >"$tmp" 2>&1; then
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+validation_message() {
+    file="$1"
+    tmp="/tmp/frpc-manager-verify.$$"
+    if [ ! -s "$file" ]; then
+        echo "配置文件为空。"
+        return 1
+    fi
+    if grep -q 'REPLACE_ME_' "$file" 2>/dev/null; then
+        echo "配置中仍包含 REPLACE_ME_ 占位符。"
+        return 1
+    fi
+    if "$FRPC_BIN" verify -c "$file" >"$tmp" 2>&1; then
+        rm -f "$tmp"
+        echo "配置校验通过。"
+        return 0
+    fi
+    cat "$tmp" 2>/dev/null
+    rm -f "$tmp"
+    return 1
+}
+
+start_child() {
+    if child_running; then
+        write_state "running" "frpc 正在运行，PID $FRPC_PID。"
+        return 0
+    fi
+    rm -f "$FRPC_PIDFILE"
+    if [ -f "$DISABLED_FILE" ]; then
+        write_state "disabled" "隧道已在管理界面中停用。"
+        return 0
+    fi
+    if ! config_ready; then
+        write_state "invalid" "frpc.toml 尚未配置完成或校验失败。请打开管理界面修改。"
+        return 1
+    fi
+    touch "$LOGFILE" 2>/dev/null || true
+    secure_readable_file "$LOGFILE"
+    nohup "$FRPC_BIN" -c "$CONFIG" >> "$LOGFILE" 2>&1 </dev/null &
+    FRPC_PID=$!
+    echo "$FRPC_PID" > "$FRPC_PIDFILE"
+    chmod 600 "$FRPC_PIDFILE" 2>/dev/null || true
+    sleep 1
+    if child_running; then
+        write_state "running" "frpc 正在运行，PID $FRPC_PID。"
+        return 0
+    fi
+    rm -f "$FRPC_PIDFILE"
+    write_state "crashed" "frpc 启动后立即退出，请查看日志。"
+    RESTART_AT=$(( $(date +%s) + 5 ))
+    return 1
+}
+
+stop_child() {
+    if ! child_running; then
+        rm -f "$FRPC_PIDFILE"
+        return 0
+    fi
+    kill "$FRPC_PID" 2>/dev/null || true
+    count=0
+    while [ -d "/proc/$FRPC_PID" ] && [ "$count" -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    if [ -d "/proc/$FRPC_PID" ]; then
+        kill -9 "$FRPC_PID" 2>/dev/null || true
+    fi
+    rm -f "$FRPC_PIDFILE"
+    return 0
+}
+
+restart_child() {
+    stop_child
+    sleep 1
+    start_child
+}
+
+write_response() {
+    id="$1"
+    result="$2"
+    shift 2
+    text="$*"
+    tmp="$RESPONSE_DIR/$id.resp.tmp"
+    out="$RESPONSE_DIR/$id.resp"
+    {
+        printf '%s\n' "$result"
+        printf '%s\n' "$text"
+    } > "$tmp"
+    chown root:"$WEB_GROUP" "$tmp" 2>/dev/null || true
+    chmod 640 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$out"
+}
+
+save_config() {
+    data="$1"
+    message="$(validation_message "$data" 2>&1)"
+    if [ $? -ne 0 ]; then
+        printf '%s\n' "$message"
+        return 1
+    fi
+    if [ -f "$CONFIG" ]; then
+        cp -f "$CONFIG" "$CONFIG.bak" 2>/dev/null || true
+        chown root:root "$CONFIG.bak" 2>/dev/null || true
+        chmod 600 "$CONFIG.bak" 2>/dev/null || true
+    fi
+    cp "$data" "$CONFIG.new" || return 1
+    chown root:root "$CONFIG.new" 2>/dev/null || true
+    chmod 600 "$CONFIG.new" || return 1
+    mv -f "$CONFIG.new" "$CONFIG" || return 1
+    printf '%s\n' "配置已保存，并保留上一版为 frpc.toml.bak。"
+    return 0
+}
+
+process_request() {
+    req="$1"
+    base="${req%.req}"
+    id="$(basename "$base")"
+    data="$base.data"
+    action="$(sed -n '1p' "$req" 2>/dev/null || true)"
+    case "$action" in
+        load)
+            if [ -f "$CONFIG" ]; then
+                {
+                    printf 'OK\n'
+                    cat "$CONFIG"
+                } > "$RESPONSE_DIR/$id.resp.tmp"
+                chown root:"$WEB_GROUP" "$RESPONSE_DIR/$id.resp.tmp" 2>/dev/null || true
+                chmod 640 "$RESPONSE_DIR/$id.resp.tmp" 2>/dev/null || true
+                mv -f "$RESPONSE_DIR/$id.resp.tmp" "$RESPONSE_DIR/$id.resp"
+            else
+                write_response "$id" "ERROR" "配置文件不存在。"
+            fi
+            ;;
+        verify)
+            if [ -f "$data" ]; then
+                msg="$(validation_message "$data" 2>&1)"
+                if [ $? -eq 0 ]; then
+                    write_response "$id" "OK" "$msg"
+                else
+                    write_response "$id" "ERROR" "$msg"
+                fi
+            else
+                write_response "$id" "ERROR" "未收到配置内容。"
+            fi
+            ;;
+        save|save_restart)
+            if [ -f "$data" ]; then
+                msg="$(save_config "$data" 2>&1)"
+                if [ $? -eq 0 ]; then
+                    if [ "$action" = "save_restart" ]; then
+                        rm -f "$DISABLED_FILE"
+                        if restart_child; then
+                            msg="$msg frpc 已重新启动。"
+                        else
+                            msg="$msg 但 frpc 未能启动，请查看状态和日志。"
+                        fi
+                    fi
+                    write_response "$id" "OK" "$msg"
+                else
+                    write_response "$id" "ERROR" "$msg"
+                fi
+            else
+                write_response "$id" "ERROR" "未收到配置内容。"
+            fi
+            ;;
+        start)
+            rm -f "$DISABLED_FILE"
+            if start_child; then
+                write_response "$id" "OK" "frpc 已启动。"
+            else
+                write_response "$id" "ERROR" "frpc 未能启动，请检查配置和日志。"
+            fi
+            ;;
+        stop)
+            touch "$DISABLED_FILE"
+            chmod 600 "$DISABLED_FILE" 2>/dev/null || true
+            stop_child
+            write_state "disabled" "隧道已在管理界面中停用。"
+            write_response "$id" "OK" "frpc 已停止，管理界面仍保持可用。"
+            ;;
+        restart)
+            rm -f "$DISABLED_FILE"
+            if restart_child; then
+                write_response "$id" "OK" "frpc 已重新启动。"
+            else
+                write_response "$id" "ERROR" "frpc 未能重新启动，请检查配置和日志。"
+            fi
+            ;;
+        *)
+            write_response "$id" "ERROR" "未知操作。"
+            ;;
+    esac
+    rm -f "$req" "$data"
+}
+
+cleanup() {
+    SHUTTING_DOWN=1
+    write_state "stopping" "正在停止 FRP Client。"
+    stop_child
+    rm -f "$MANAGER_PIDFILE"
+    write_state "stopped" "FRP Client 套件已停止。"
+    exit 0
+}
+
+trap cleanup TERM INT HUP
+
+mkdir -p "$CONTROL_DIR" "$RESPONSE_DIR"
+echo $$ > "$MANAGER_PIDFILE"
+chmod 600 "$MANAGER_PIDFILE" 2>/dev/null || true
+write_state "starting" "正在启动 FRP Client 管理进程。"
+
+if [ -x "$FRPC_BIN" ]; then
+    VERSION="$($FRPC_BIN --version 2>/dev/null | head -n 1 || true)"
+    printf '%s\n' "${VERSION:-unknown}" > "$VAR_DIR/version"
+    secure_readable_file "$VAR_DIR/version"
+fi
+
+start_child || true
+
+while [ "$SHUTTING_DOWN" -eq 0 ]; do
+    for req in "$CONTROL_DIR"/*.req; do
+        [ -f "$req" ] || continue
+        process_request "$req"
+    done
+
+    if child_running; then
+        write_state "running" "frpc 正在运行，PID $FRPC_PID。"
+    elif [ -f "$DISABLED_FILE" ]; then
+        write_state "disabled" "隧道已在管理界面中停用。"
+    else
+        rm -f "$FRPC_PIDFILE"
+        now="$(date +%s)"
+        if config_ready; then
+            if [ "$RESTART_AT" -eq 0 ] || [ "$now" -ge "$RESTART_AT" ]; then
+                start_child || true
+            fi
+        else
+            write_state "invalid" "frpc.toml 尚未配置完成或校验失败。请打开管理界面修改。"
+        fi
+    fi
+    sleep 2
+done
